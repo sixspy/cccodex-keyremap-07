@@ -53,6 +53,7 @@ createApp({
     const username=ref('admin'), password=ref('123456'), err=ref(''), actionErr=ref('');
     const leftTab=ref(0), rightTab=ref(0);
     const versions=ref([]), mappings=ref([]), formal=ref([]), conflicts=ref([]);
+    const replays=ref([]), generations=ref([]), verify=ref(null), verifyErr=ref('');
     const oldKey=ref('OLD-B1');
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
@@ -80,6 +81,30 @@ createApp({
       formal.value=Array.isArray(f.items)?f.items:[];
       const c=await loadJson('/api/conflicts'); if(c===null) return;
       conflicts.value=Array.isArray(c.items)?c.items:[];
+      const r=await loadJson('/api/conflict-replays'); if(r===null) return;
+      replays.value=Array.isArray(r.items)?r.items:[];
+      const g=await loadJson('/api/generations'); if(g===null) return;
+      generations.value=Array.isArray(g.items)?g.items:[];
+    }
+    async function doReplay(id){
+      actionErr.value='';
+      const r=await fetch('/api/conflicts/'+id+'/replay',{method:'POST',headers:auth()});
+      const j=await r.json().catch(()=>({}));
+      if(r.ok){
+        actionErr.value='重放结局：'+j.outcome+'（generation '+j.generation+'，'+(j.detail||'')+'）';
+      }else if(j&&j.outcome){
+        actionErr.value='未终局：'+j.outcome+' — '+(j.detail||'');
+      }else{
+        actionErr.value=j.detail||'重放失败';
+      }
+      await refresh();
+    }
+    async function doVerify(id){
+      verifyErr.value=''; verify.value=null;
+      const r=await fetch('/api/conflicts/'+id+'/verification',{headers:auth()});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){verifyErr.value=j.detail||'核证失败';return;}
+      verify.value=j;
     }
     async function doRemap(){
       actionErr.value='';
@@ -88,7 +113,8 @@ createApp({
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap};
+    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,
+      formal,conflicts,replays,generations,verify,verifyErr,oldKey,login,logout,doRemap,doReplay,doVerify};
   },
   template:`
   <div v-if="!token" class="login">
@@ -129,16 +155,67 @@ createApp({
         <div class="tabs">
           <button :class="{on:rightTab===0}" @click="rightTab=0">正式区</button>
           <button :class="{on:rightTab===1}" @click="rightTab=1">冲突队列</button>
+          <button :class="{on:rightTab===2}" @click="rightTab=2">重放审计</button>
+          <button :class="{on:rightTab===3}" @click="rightTab=3">世代列表</button>
         </div>
         <div class="box" v-show="rightTab===0">
-          <h2>Formal Zone</h2>
-          <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>at</th></tr></thead>
-          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.created_at}}</td></tr></tbody></table>
+          <h2>Formal Zone <span class="pill">UNIQUE(entity_key) · 幂等跳过口径</span></h2>
+          <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>gen</th><th>at</th></tr></thead>
+          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.generation}}</td><td>{{f.created_at}}</td></tr></tbody></table>
         </div>
         <div class="box" v-show="rightTab===1">
           <h2>Conflicts</h2>
-          <table><thead><tr><th>old</th><th>reason</th><th>status</th></tr></thead>
-          <tbody><tr v-for="c in conflicts" :key="c.id"><td class="bad">{{c.old_key}}</td><td>{{c.reason}}</td><td>{{c.status}}</td></tr></tbody></table>
+          <table><thead><tr><th>old</th><th>reason</th><th>status</th><th>操作</th></tr></thead>
+          <tbody><tr v-for="c in conflicts" :key="c.id">
+            <td class="bad">{{c.old_key}}</td><td>{{c.reason}}</td>
+            <td :class="c.status==='挂起'?'bad':'ok'">{{c.status}}</td>
+            <td style="white-space:nowrap">
+              <button class="ghost" @click="doReplay(c.id)">重放</button>
+              <button class="ghost" @click="doVerify(c.id)">核证</button>
+            </td>
+          </tr></tbody></table>
+          <div class="err">{{actionErr}}</div>
+          <div v-if="verifyErr" class="err">{{verifyErr}}</div>
+          <div v-if="verify" class="box" style="margin-top:10px;background:#0a0a0a">
+            <h2>互证卡 · conflict #{{verify.conflict.id}}
+              <span :class="verify.all_ok?'ok':'bad'">{{verify.all_ok?'五方互证通过':'核证异常'}}</span></h2>
+            <table><thead><tr><th>核证项</th><th>结果</th><th>说明</th></tr></thead>
+            <tbody><tr v-for="k in verify.checks" :key="k.name">
+              <td>{{k.name}}</td><td :class="k.ok?'ok':'bad'">{{k.ok?'通过':'失败'}}</td><td>{{k.detail}}</td>
+            </tr></tbody></table>
+            <h2 style="margin-top:10px">正式区对质</h2>
+            <table v-if="verify.formal"><tbody>
+              <tr><td>entity_key</td><td class="ok">{{verify.formal.entity_key}}</td></tr>
+              <tr><td>generation</td><td>{{verify.formal.generation}}</td></tr>
+              <tr><td>formal_id</td><td>{{verify.formal.id}}</td></tr>
+            </tbody></table>
+            <div v-else class="err">挂起中：尚无对应正式行</div>
+            <h2 style="margin-top:10px">重放登记（只追加）</h2>
+            <table><thead><tr><th>#</th><th>at</th><th>outcome</th><th>gen</th><th>formal</th></tr></thead>
+            <tbody><tr v-for="r in verify.replays" :key="r.id">
+              <td>{{r.id}}</td><td>{{r.replay_at}}</td>
+              <td :class="r.outcome==='replay_contention'?'bad':'ok'">{{r.outcome}}</td>
+              <td>{{r.generation}}</td><td>{{r.formal_id}}</td>
+            </tr></tbody></table>
+          </div>
+        </div>
+        <div class="box" v-show="rightTab===2">
+          <h2>Conflict Replays <span class="pill">conflict_id + replay_at + outcome + generation</span></h2>
+          <table><thead><tr><th>cid</th><th>at</th><th>outcome</th><th>gen</th><th>entity</th><th>formal</th><th>detail</th></tr></thead>
+          <tbody><tr v-for="r in replays" :key="r.id">
+            <td>{{r.conflict_id}}</td><td>{{r.replay_at}}</td>
+            <td :class="r.outcome==='replay_contention'?'bad':(r.outcome==='no_mapping'?'bad':'ok')">{{r.outcome}}</td>
+            <td>{{r.generation}}</td><td>{{r.entity_key||'—'}}</td><td>{{r.formal_id||'—'}}</td>
+            <td style="color:#9a9a9a">{{r.detail}}</td>
+          </tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===3">
+          <h2>Generations <span class="pill">甲路径：generation 恒为 1，无覆盖抬升</span></h2>
+          <table><thead><tr><th>formal</th><th>entity</th><th>gen</th><th>version</th><th>replay refs</th></tr></thead>
+          <tbody><tr v-for="g in generations" :key="g.id">
+            <td>#{{g.id}}</td><td class="ok">{{g.entity_key}}</td><td>{{g.generation}}</td>
+            <td>{{g.version}}</td><td>{{g.replay_refs}}</td>
+          </tr></tbody></table>
         </div>
       </div>
     </div>

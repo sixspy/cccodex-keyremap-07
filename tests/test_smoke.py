@@ -2,10 +2,14 @@
 import pytest
 from fastapi.testclient import TestClient
 from app import app, init_db
+import app as appmod
 
 @pytest.fixture(autouse=True)
-def _db(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.DB_PATH", tmp_path/"t.db"); init_db(); yield
+def _db(tmp_path):
+    appmod._db_path_override = tmp_path / "t.db"
+    init_db()
+    yield
+    appmod._db_path_override = None
 
 def test_remap_and_conflict():
     c = TestClient(app)
